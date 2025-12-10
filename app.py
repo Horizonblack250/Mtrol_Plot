@@ -110,7 +110,7 @@ fig.add_trace(go.Scatter(
     y=plot_df[vfm_plot_col],
     mode="lines",
     name="VFM Flow (kg/h)",
-    line=dict(color="blue", width=1.5),
+    line=dict(color="#CEDCCA", width=1.5),
     hovertemplate="t: %{x:.0f}s<br>VFM: %{y:.2f} kg/h<br>Time: %{customdata}",
     customdata=plot_df["Timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
 ))

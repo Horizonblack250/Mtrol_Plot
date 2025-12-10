@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 # ----------------------------
 # CONFIG / PATH
@@ -11,6 +11,7 @@ from datetime import timedelta
 DATA_PATH = "data/df_clean.csv"   # put your CSV here
 EPS_VFM = 1e-6
 
+# set page config before other Streamlit calls
 st.set_page_config(page_title="Mtrol — Pressures & Flows (interactive)", layout="wide")
 st.title("Mtrol — Pressures & Flows (interactive)")
 
@@ -25,14 +26,11 @@ def load_data(path):
     df = df.dropna(subset=["Timestamp"]).sort_values("Timestamp").reset_index(drop=True)
 
     # detect and standardize column names (flexible)
-    colmap = {}
-    # flows
-    possible_vfm = ["VFM Flow Rate (kg/h)", "VFM_flow_kgph", "VFM_flow_kg/h", "VFM_flow_kgph", "VFM_flow"]
+    possible_vfm = ["VFM Flow Rate (kg/h)", "VFM_flow_kgph", "VFM_flow_kg/h", "VFM_flow", "VFM Flow (kg per h)", "VFM Flow (kg/h)"]
     possible_mtrol = ["Mtrol revised flow", "Mtrol_flow_kgph", "Mtrol Flow (kg/h)", "Mtrol_flow"]
-    # pressures
-    possible_p1 = ["Inlet Pressure P1 (barg)", "P1", "Inlet Pressure P1 (bg)", "P1"]
-    possible_p2 = ["Outlet Pressure P2 (barg)", "P2", "Outlet Pressure P2 (bg)", "P2"]
-    possible_p2sp = ["Setpoint P2 (bg)", "P2_SP", "Setpoint P2 (barg)", "P2_SP"]
+    possible_p1 = ["Inlet Pressure P1 (barg)", "P1", "Inlet Pressure P1 (bg)"]
+    possible_p2 = ["Outlet Pressure P2 (barg)", "P2", "Outlet Pressure P2 (bg)"]
+    possible_p2sp = ["Setpoint P2 (bg)", "P2_SP", "Setpoint P2 (barg)"]
 
     vfm = next((c for c in possible_vfm if c in df.columns), None)
     mtrol = next((c for c in possible_mtrol if c in df.columns), None)
@@ -49,7 +47,7 @@ def load_data(path):
     else:
         df["P2_SP"] = np.nan
 
-    # elapsed seconds (for optional uses) and dt seconds between rows
+    # elapsed seconds and dt seconds between rows
     df["t_seconds"] = (df["Timestamp"] - df["Timestamp"].iloc[0]).dt.total_seconds()
     df["dt_s"] = df["Timestamp"].diff().dt.total_seconds().fillna(method="bfill")
     df["dt_s"] = df["dt_s"].fillna(df["dt_s"].median())
@@ -72,14 +70,15 @@ except Exception as e:
 # ----------------------------
 st.sidebar.header("Controls")
 
-# datetime slider (start,end) using pandas Timestamps
-min_dt = df["Timestamp"].min()
-max_dt = df["Timestamp"].max()
+# Convert pandas Timestamps to native python datetimes for the slider
+min_ts = df["Timestamp"].min().to_pydatetime()
+max_ts = df["Timestamp"].max().to_pydatetime()
+
 sel_start, sel_end = st.sidebar.slider(
-    "Select time window",
-    value=(min_dt, max_dt),
-    min_value=min_dt,
-    max_value=max_dt,
+    "Select time window (datetime)",
+    min_value=min_ts,
+    max_value=max_ts,
+    value=(min_ts, max_ts),
     format="YYYY-MM-DD HH:mm:ss"
 )
 
@@ -91,25 +90,24 @@ smooth_rows = max(1, int(round(smooth_seconds / median_dt))) if smooth_seconds >
 # toggle error % trace
 show_error_pct = st.sidebar.checkbox("Show Error % (VFM - Mtrol) on right axis (bottom plot)", value=True)
 
-# toggle pressures (top plot is always pressures)
-# downsample
+# downsample parameter
 max_points = st.sidebar.slider("Max points to plot (for performance)", 1000, 200000, 25000, step=500)
 
 # thresholds (barg) for P2 in-spec KPI: 0.1 to 1.0 barg step 0.1
 p2_thresholds = [round(x, 2) for x in np.arange(0.1, 1.01, 0.1)]
-# add some larger buckets optionally
 p2_thresholds += [2.0, 5.0]
 
 # ----------------------------
 # Filter to selected datetime window
 # ----------------------------
+# sel_start and sel_end are python datetimes — use directly
 mask = (df["Timestamp"] >= pd.to_datetime(sel_start)) & (df["Timestamp"] <= pd.to_datetime(sel_end))
 window_df = df.loc[mask].copy()
 if window_df.empty:
     st.warning("No data in selected time window.")
     st.stop()
 
-# optional smoothing
+# optional smoothing (centered rolling)
 if smooth_rows and smooth_rows > 1:
     window_df = window_df.sort_values("Timestamp")
     window_df["VFM_sm"] = window_df["VFM_flow_kgph"].rolling(window=smooth_rows, min_periods=1, center=True).mean()
@@ -123,7 +121,7 @@ else:
     mtrol_col_plot = "Mtrol_flow_kgph"
     err_col_plot = "Error_pct"
 
-# downsample uniformly if too many points
+# downsample uniformly if too many points (safe)
 if len(window_df) > max_points:
     window_df = window_df.sample(n=max_points, random_state=42).sort_values("Timestamp")
 
@@ -136,7 +134,6 @@ def integrate_mass_kg(df_slice, flow_col):
     ts = pd.to_datetime(df_slice["Timestamp"])
     flows = df_slice[flow_col].values
     total = 0.0
-    # iterate pairwise
     for i in range(len(ts) - 1):
         dt_hours = (ts.iloc[i+1] - ts.iloc[i]).total_seconds() / 3600.0
         avg_flow = 0.5 * (flows[i] + flows[i+1])
@@ -147,18 +144,16 @@ vfm_total_kg = integrate_mass_kg(window_df.sort_values("Timestamp"), vfm_col_plo
 mtrol_total_kg = integrate_mass_kg(window_df.sort_values("Timestamp"), mtrol_col_plot)
 
 # ----------------------------
-# P2 in-spec KPIs (absolute barg thresholds) for the window (only where P2_SP exists)
+# P2 in-spec KPIs (absolute barg thresholds) for the window
 # ----------------------------
 kpi_table = []
 if window_df["P2_SP"].notna().sum() > 0:
-    # compute absolute difference |P2 - P2_SP|
     abs_diff = (window_df["P2"] - window_df["P2_SP"]).abs()
     total_rows_with_sp = (~window_df["P2_SP"].isna()).sum()
     for thr in p2_thresholds:
         pct_in_spec = 100.0 * (abs_diff <= thr).sum() / total_rows_with_sp if total_rows_with_sp > 0 else np.nan
         kpi_table.append((thr, pct_in_spec))
 else:
-    # no P2_SP available
     kpi_table = []
 
 # ----------------------------
@@ -169,7 +164,7 @@ fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                     vertical_spacing=0.06,
                     specs=[[{"secondary_y": False}], [{"secondary_y": True}]])
 
-# Top plot: P1, P2, P2_SP (pressures) — left axis (barg)
+# Top plot: P1, P2, P2_SP (pressures)
 fig.add_trace(go.Scatter(
     x=window_df["Timestamp"],
     y=window_df["P1"],
@@ -198,10 +193,9 @@ if window_df["P2_SP"].notna().any():
         hovertemplate="%{x}<br>P2_SP: %{y:.3f} barg"
     ), row=1, col=1)
 
-# Top plot layout tweaks
 fig.update_yaxes(title_text="Pressure (barg)", row=1, col=1)
 
-# Bottom plot: flows (left) and optional error% on right (secondary_y)
+# Bottom plot: flows + optional error%
 fig.add_trace(go.Scatter(
     x=window_df["Timestamp"],
     y=window_df[vfm_col_plot],
@@ -230,23 +224,18 @@ if show_error_pct:
         hovertemplate="%{x}<br>Error: %{y:.2f}%"
     ), row=2, col=1, secondary_y=True)
 
-# Bottom axes labels
 fig.update_yaxes(title_text="Flow (kg/h)", row=2, col=1, secondary_y=False)
 if show_error_pct:
     fig.update_yaxes(title_text="Error %", row=2, col=1, secondary_y=True)
 
-# Shared x-axis label
 fig.update_xaxes(title_text="Timestamp (datetime)", row=2, col=1)
-
 fig.update_layout(height=800,
                   margin=dict(l=60, r=80, t=90, b=80),
-                  legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="right", x=1))
-
-# enable unified hover
-fig.update_layout(hovermode="x unified")
+                  legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="right", x=1),
+                  hovermode="x unified")
 
 # ----------------------------
-# Show KPIs and totals (top row)
+# Show KPIs and totals
 # ----------------------------
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Points shown", f"{len(window_df):,}")
@@ -254,16 +243,14 @@ k2.metric("Window duration", f"{timedelta(seconds=int((window_df['Timestamp'].ma
 k3.metric("Total VFM (kg)", f"{vfm_total_kg:,.1f}")
 k4.metric("Total Mtrol (kg)", f"{mtrol_total_kg:,.1f}")
 
-# ----------------------------
-# P2-in-spec table
-# ----------------------------
-st.markdown("### P2 in-spec fractions (absolute barg thresholds) — selected window")
+# P2 in-spec table
+st.markdown("### P2 in-spec fractions (absolute barg thresholds)")
 if not kpi_table:
     st.info("No P2 setpoints (P2_SP) available in this window to evaluate.")
 else:
     df_kpi = pd.DataFrame(kpi_table, columns=["threshold_barg", "pct_in_spec"])
-    df_kpi["threshold_label"] = df_kpi["threshold_barg"].apply(lambda x: f"±{x:.2f} barg")
-    df_kpi = df_kpi[["threshold_label", "pct_in_spec"]].rename(columns={"threshold_label": "Threshold", "pct_in_spec": "% in spec"})
+    df_kpi["Threshold"] = df_kpi["threshold_barg"].apply(lambda x: f"±{x:.2f} barg")
+    df_kpi = df_kpi[["Threshold", "pct_in_spec"]].rename(columns={"pct_in_spec": "% in spec"})
     st.dataframe(df_kpi.style.format({"% in spec": "{:.2f}"}), use_container_width=True)
 
 # ----------------------------
@@ -279,4 +266,4 @@ if st.checkbox("Show sample of window data (first 300 rows)"):
     st.dataframe(window_df[show_cols].head(300), use_container_width=True)
 
 st.markdown("---")
-st.caption("Top: pressures (P1, P2, P2_SP). Bottom: flows (VFM, Mtrol) and optional Error % on right. Timestamp is proper datetime; use the slider to choose a precise time window for analysis.")
+st.caption("Top: pressures (P1, P2, P2_SP). Bottom: flows (VFM, Mtrol) and optional Error % on right. Use the datetime slider to choose a precise time window for analysis.")

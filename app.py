@@ -231,5 +231,52 @@ if show_error_pct:
     ), row=2, col=1, secondary_y=True)
 
 # Bottom axes labels
-fig.update_yaxes(title_text="
+fig.update_yaxes(title_text="Flow (kg/h)", row=2, col=1, secondary_y=False)
+if show_error_pct:
+    fig.update_yaxes(title_text="Error %", row=2, col=1, secondary_y=True)
 
+# Shared x-axis label
+fig.update_xaxes(title_text="Timestamp (datetime)", row=2, col=1)
+
+fig.update_layout(height=800,
+                  margin=dict(l=60, r=80, t=90, b=80),
+                  legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="right", x=1))
+
+# enable unified hover
+fig.update_layout(hovermode="x unified")
+
+# ----------------------------
+# Show KPIs and totals (top row)
+# ----------------------------
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Points shown", f"{len(window_df):,}")
+k2.metric("Window duration", f"{timedelta(seconds=int((window_df['Timestamp'].max() - window_df['Timestamp'].min()).total_seconds()))}")
+k3.metric("Total VFM (kg)", f"{vfm_total_kg:,.1f}")
+k4.metric("Total Mtrol (kg)", f"{mtrol_total_kg:,.1f}")
+
+# ----------------------------
+# P2-in-spec table
+# ----------------------------
+st.markdown("### P2 in-spec fractions (absolute barg thresholds) — selected window")
+if not kpi_table:
+    st.info("No P2 setpoints (P2_SP) available in this window to evaluate.")
+else:
+    df_kpi = pd.DataFrame(kpi_table, columns=["threshold_barg", "pct_in_spec"])
+    df_kpi["threshold_label"] = df_kpi["threshold_barg"].apply(lambda x: f"±{x:.2f} barg")
+    df_kpi = df_kpi[["threshold_label", "pct_in_spec"]].rename(columns={"threshold_label": "Threshold", "pct_in_spec": "% in spec"})
+    st.dataframe(df_kpi.style.format({"% in spec": "{:.2f}"}), use_container_width=True)
+
+# ----------------------------
+# Display the plot
+# ----------------------------
+st.plotly_chart(fig, use_container_width=True)
+
+# ----------------------------
+# Optional: show raw table
+# ----------------------------
+if st.checkbox("Show sample of window data (first 300 rows)"):
+    show_cols = ["Timestamp", "P1", "P2", "P2_SP", "VFM_flow_kgph", "Mtrol_flow_kgph", "Error_pct"]
+    st.dataframe(window_df[show_cols].head(300), use_container_width=True)
+
+st.markdown("---")
+st.caption("Top: pressures (P1, P2, P2_SP). Bottom: flows (VFM, Mtrol) and optional Error % on right. Timestamp is proper datetime; use the slider to choose a precise time window for analysis.")
